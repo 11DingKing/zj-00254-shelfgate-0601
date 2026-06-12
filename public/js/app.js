@@ -162,7 +162,7 @@ async function renderVersionsPage() {
               <td>
                 <button class="link-btn" onclick="viewVersion(${item.id})">详情</button>
                 ${
-                  item.status === "pending" || item.status === "rejected"
+                  item.status === "pending"
                     ? `<button class="link-btn" onclick="startReview(${item.id})" style="margin-left: 8px;">开始审核</button>`
                     : ""
                 }
@@ -343,11 +343,18 @@ async function viewVersion(id) {
   `;
 
   let footer = "";
-  if (v.status === "pending" || v.status === "rejected") {
+  if (v.status === "pending") {
     footer = `
       <div class="modal-footer">
         <button class="btn btn-default" onclick="closeModal()">关闭</button>
         <button class="btn btn-primary" onclick="startReview(${v.id}); closeModal();">开始审核</button>
+      </div>
+    `;
+  } else if (v.status === "rejected") {
+    footer = `
+      <div class="modal-footer">
+        <button class="btn btn-default" onclick="closeModal()">关闭</button>
+        <button class="btn btn-primary" onclick="reSubmitVersion(${v.id}); closeModal();">重新提交</button>
       </div>
     `;
   } else if (v.status === "approved" && v.shelf_status !== "off_shelf") {
@@ -394,17 +401,18 @@ async function showReviewModal(versionId) {
   const itemsHtml = checkItems
     .map(
       (item, index) => `
-    <div class="check-item" id="check-item-${item.id}">
+    <div class="check-item unreviewed" id="check-item-${item.id}">
       <div class="check-item-header">
         <div class="check-item-info">
           <span class="check-item-category">${item.category}</span>
           <div class="check-item-name">${index + 1}. ${item.name}</div>
           <div class="check-item-desc">${item.description || ""}</div>
         </div>
+        <span class="review-status-badge" id="status-badge-${item.id}">未审核</span>
       </div>
       <div class="result-options">
         <label class="result-option">
-          <input type="radio" name="item-${item.id}" value="pass" onchange="updateCheckItemResult(${item.id}, 'pass')" checked>
+          <input type="radio" name="item-${item.id}" value="pass" onchange="updateCheckItemResult(${item.id}, 'pass')">
           ✅ 通过
         </label>
         <label class="result-option">
@@ -468,35 +476,55 @@ async function showReviewModal(versionId) {
 function updateCheckItemResult(itemId, result) {
   const itemEl = document.getElementById(`check-item-${itemId}`);
   const commentEl = document.getElementById(`comment-${itemId}`);
+  const badgeEl = document.getElementById(`status-badge-${itemId}`);
 
-  itemEl.classList.remove("pass", "fail");
+  itemEl.classList.remove("unreviewed", "pass", "fail");
   itemEl.classList.add(result);
 
   if (result === "fail") {
     commentEl.style.display = "block";
+    badgeEl.textContent = "不通过";
+    badgeEl.className = "review-status-badge status-fail";
   } else {
     commentEl.style.display = "none";
+    badgeEl.textContent = "通过";
+    badgeEl.className = "review-status-badge status-pass";
   }
 }
 
 async function submitReviewResult(versionId) {
   const items = window.currentCheckItems || [];
-  const results = items.map((item) => {
+  const results = [];
+  const unreviewedItems = [];
+
+  for (const item of items) {
     const radios = document.getElementsByName(`item-${item.id}`);
-    let result = "pass";
+    let result = null;
     for (const r of radios) {
       if (r.checked) {
         result = r.value;
         break;
       }
     }
+    if (!result) {
+      unreviewedItems.push(item.name);
+      continue;
+    }
     const commentEl = document.getElementById(`comment-${item.id}`);
-    return {
+    results.push({
       check_item_id: item.id,
       result,
       comment: result === "fail" ? commentEl.value : null,
-    };
-  });
+    });
+  }
+
+  if (unreviewedItems.length > 0) {
+    showToast(
+      `还有 ${unreviewedItems.length} 项未审核：${unreviewedItems[0]}${unreviewedItems.length > 1 ? "等" : ""}`,
+      "error",
+    );
+    return;
+  }
 
   const hasFail = results.some((r) => r.result === "fail");
   const rejectReason = document.getElementById("reject-reason").value;

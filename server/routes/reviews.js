@@ -28,11 +28,46 @@ router.post("/start/:versionId", (req, res) => {
     return res.json({ code: 1, message: "版本不存在" });
   }
 
-  if (version.status !== "pending" && version.status !== "rejected") {
-    return res.json({ code: 1, message: "当前状态不允许开始审核" });
+  if (version.status !== "pending") {
+    return res.json({
+      code: 1,
+      message: "当前状态不允许开始审核，请先由厂商重新提交",
+    });
+  }
+
+  const activeRecord = db
+    .prepare(
+      `
+    SELECT * FROM review_records 
+    WHERE version_id = ? AND end_time IS NULL
+    ORDER BY review_round DESC LIMIT 1
+  `,
+    )
+    .get(versionId);
+  if (activeRecord) {
+    return res.json({
+      code: 1,
+      message: "存在未完成的审核记录，请先完成当前审核",
+    });
   }
 
   const currentRound = version.reject_count + 1;
+
+  const lastRecord = db
+    .prepare(
+      `
+    SELECT * FROM review_records 
+    WHERE version_id = ?
+    ORDER BY review_round DESC LIMIT 1
+  `,
+    )
+    .get(versionId);
+  if (lastRecord && lastRecord.review_round >= currentRound) {
+    return res.json({
+      code: 1,
+      message: "审核轮次异常，请先由厂商重新提交",
+    });
+  }
 
   const result = db.transaction(() => {
     db.prepare(
@@ -81,6 +116,41 @@ router.post("/submit/:versionId", (req, res) => {
     return res.json({ code: 1, message: "请填写审核项结果" });
   }
 
+  const allCheckItems = db
+    .prepare("SELECT id FROM check_items ORDER BY id ASC")
+    .all();
+  const allItemIds = allCheckItems.map((item) => item.id);
+  const totalCheckItems = allCheckItems.length;
+
+  const submittedItemIds = results
+    .map((r) => {
+      const id = parseInt(r.check_item_id);
+      return isNaN(id) ? null : id;
+    })
+    .filter((id) => id !== null);
+  const uniqueItemIds = [...new Set(submittedItemIds)];
+
+  const missingIds = allItemIds.filter((id) => !uniqueItemIds.includes(id));
+  if (missingIds.length > 0) {
+    return res.json({
+      code: 1,
+      message: `请完成所有 ${totalCheckItems} 项检查，还有 ${missingIds.length} 项未审核`,
+    });
+  }
+
+  const validResults = ["pass", "fail"];
+  const hasInvalidResult = results.some(
+    (r) => !validResults.includes(r.result),
+  );
+  if (hasInvalidResult) {
+    return res.json({ code: 1, message: "存在无效的审核结果值" });
+  }
+
+  const invalidIds = uniqueItemIds.filter((id) => !allItemIds.includes(id));
+  if (invalidIds.length > 0) {
+    return res.json({ code: 1, message: "存在无效的检查项ID" });
+  }
+
   const hasFail = results.some((r) => r.result === "fail");
   const finalResult = hasFail ? "rejected" : "approved";
 
@@ -96,6 +166,18 @@ router.post("/submit/:versionId", (req, res) => {
 
   if (!currentRecord) {
     return res.json({ code: 1, message: "审核记录不存在" });
+  }
+
+  if (currentRecord.end_time) {
+    return res.json({ code: 1, message: "当前审核已完成，不能重复提交" });
+  }
+
+  const expectedRound = version.reject_count + 1;
+  if (currentRecord.review_round !== expectedRound) {
+    return res.json({
+      code: 1,
+      message: "审核轮次不匹配，请重新开始审核",
+    });
   }
 
   db.transaction(() => {
