@@ -1934,7 +1934,7 @@ async function renderStatsPage() {
             <th>厂商</th>
             <th>提交版本数</th>
             <th>通过数</th>
-            <th>驳回数</th>
+            <th>当前驳回</th>
             <th>累计驳回次数</th>
             <th>驳回率</th>
           </tr>

@@ -474,6 +474,17 @@ function initSeedData() {
       comment: null,
     });
 
+    insertRecord.run({
+      version_id: v2.lastInsertRowid,
+      review_round: 2,
+      reviewer: "张审核",
+      checklist_version_id: videoTmplVersionId,
+      start_time: new Date(now - 1 * hour).toISOString(),
+      end_time: null,
+      result: null,
+      reject_reason: null,
+    });
+
     const v3 = insertVersion.run({
       app_name: "每日头条",
       version_no: "3.8.1",
@@ -742,12 +753,95 @@ function initSeedData() {
   seedData();
 }
 
+function fixDataConsistency() {
+  const versions = db
+    .prepare("SELECT id FROM app_versions ORDER BY id ASC")
+    .all();
+
+  const updateRejectCount = db.prepare(`
+    UPDATE app_versions SET reject_count = ? WHERE id = ?
+  `);
+
+  const updateStatus = db.prepare(`
+    UPDATE app_versions SET status = ? WHERE id = ?
+  `);
+
+  let fixedRejectCount = 0;
+  let fixedStatus = 0;
+
+  for (const v of versions) {
+    const actualRejects = db
+      .prepare(
+        `
+      SELECT COUNT(*) as count FROM review_records 
+      WHERE version_id = ? AND result = 'rejected'
+    `,
+      )
+      .get(v.id).count;
+
+    const current = db
+      .prepare("SELECT reject_count, status FROM app_versions WHERE id = ?")
+      .get(v.id);
+
+    if (current.reject_count !== actualRejects) {
+      updateRejectCount.run(actualRejects, v.id);
+      fixedRejectCount++;
+    }
+
+    const activeReview = db
+      .prepare(
+        `
+      SELECT id FROM review_records 
+      WHERE version_id = ? AND (end_time IS NULL OR result IS NULL)
+      ORDER BY review_round DESC LIMIT 1
+    `,
+      )
+      .get(v.id);
+
+    let expectedStatus = current.status;
+
+    if (activeReview) {
+      expectedStatus = "reviewing";
+    } else {
+      const latestResult = db
+        .prepare(
+          `
+        SELECT result FROM review_records 
+        WHERE version_id = ? AND result IS NOT NULL
+        ORDER BY review_round DESC LIMIT 1
+      `,
+        )
+        .get(v.id);
+
+      if (!latestResult) {
+        expectedStatus = "pending";
+      } else if (latestResult.result === "approved") {
+        expectedStatus = "approved";
+      } else if (latestResult.result === "rejected") {
+        expectedStatus = "rejected";
+      }
+    }
+
+    if (current.status !== expectedStatus) {
+      updateStatus.run(expectedStatus, v.id);
+      fixedStatus++;
+    }
+  }
+
+  if (fixedRejectCount > 0 || fixedStatus > 0) {
+    console.log(
+      `数据一致性修复完成：修复 ${fixedRejectCount} 条版本驳回次数，修复 ${fixedStatus} 条版本状态`,
+    );
+  }
+}
+
 function initAll() {
   initSchema();
   initCheckItems();
   initCategoriesAndTemplates();
   initChecklistVersions();
   initSeedData();
+  fixDataConsistency();
   console.log("数据库初始化完成");
 }
 

@@ -33,8 +33,11 @@ router.get("/overview", (req, res) => {
     .get().count;
 
   const totalRejects =
-    db.prepare("SELECT SUM(reject_count) as count FROM app_versions").get()
-      .count || 0;
+    db
+      .prepare(
+        "SELECT COUNT(*) as count FROM review_records WHERE result = 'rejected'",
+      )
+      .get().count || 0;
 
   res.json({
     code: 0,
@@ -55,19 +58,21 @@ router.get("/by-vendor", (req, res) => {
     .prepare(
       `
     SELECT 
-      vendor,
-      COUNT(*) as total_versions,
-      SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved_count,
-      SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected_count,
-      SUM(reject_count) as total_rejects,
+      av.vendor,
+      COUNT(DISTINCT av.id) as total_versions,
+      SUM(CASE WHEN av.status = 'approved' THEN 1 ELSE 0 END) as approved_count,
+      SUM(CASE WHEN av.status = 'rejected' THEN 1 ELSE 0 END) as rejected_count,
+      COALESCE(SUM(CASE WHEN rr.result = 'rejected' THEN 1 ELSE 0 END), 0) as total_rejects,
+      COUNT(rr.id) as total_review_rounds,
       ROUND(
-        CASE WHEN COUNT(*) > 0 
-          THEN SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) 
+        CASE WHEN COUNT(rr.id) > 0 
+          THEN COALESCE(SUM(CASE WHEN rr.result = 'rejected' THEN 1 ELSE 0 END), 0) * 100.0 / COUNT(rr.id)
           ELSE 0 
         END, 2
       ) as reject_rate
-    FROM app_versions
-    GROUP BY vendor
+    FROM app_versions av
+    LEFT JOIN review_records rr ON av.id = rr.version_id AND rr.result IS NOT NULL
+    GROUP BY av.vendor
     ORDER BY reject_rate DESC, total_versions DESC
   `,
     )
