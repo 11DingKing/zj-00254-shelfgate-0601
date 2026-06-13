@@ -3,10 +3,99 @@ const router = express.Router();
 const db = require("../db/database");
 
 router.get("/check-items", (req, res) => {
+  const { version_id } = req.query;
+
+  if (version_id) {
+    const version = db
+      .prepare("SELECT * FROM app_versions WHERE id = ?")
+      .get(version_id);
+    if (!version) {
+      return res.json({ code: 1, message: "版本不存在" });
+    }
+
+    const activeRecord = db
+      .prepare(
+        `
+      SELECT rr.checklist_version_id 
+      FROM review_records rr
+      WHERE rr.version_id = ? AND rr.end_time IS NULL
+      ORDER BY rr.review_round DESC LIMIT 1
+    `,
+      )
+      .get(version_id);
+
+    if (activeRecord && activeRecord.checklist_version_id) {
+      const items = db
+        .prepare(
+          `
+        SELECT cvi.* 
+        FROM checklist_version_items cvi
+        WHERE cvi.checklist_version_id = ?
+        ORDER BY cvi.sort_order ASC
+      `,
+        )
+        .all(activeRecord.checklist_version_id);
+
+      return res.json({
+        code: 0,
+        data: items.map((item) => ({
+          id: item.check_item_id,
+          code: item.check_item_code,
+          name: item.check_item_name,
+          description: item.check_item_description,
+          category: item.check_item_category,
+          sort_order: item.sort_order,
+          checklist_version_item_id: item.id,
+        })),
+      });
+    }
+
+    if (version.category_id) {
+      const latestVersion = db
+        .prepare(
+          `
+        SELECT cv.id 
+        FROM category_template_mapping ctm
+        JOIN checklist_versions cv ON ctm.template_id = cv.template_id
+        WHERE ctm.category_id = ? AND cv.is_locked = 1
+        ORDER BY cv.created_at DESC
+        LIMIT 1
+      `,
+        )
+        .get(version.category_id);
+
+      if (latestVersion) {
+        const items = db
+          .prepare(
+            `
+          SELECT cvi.* 
+          FROM checklist_version_items cvi
+          WHERE cvi.checklist_version_id = ?
+          ORDER BY cvi.sort_order ASC
+        `,
+          )
+          .all(latestVersion.id);
+
+        return res.json({
+          code: 0,
+          data: items.map((item) => ({
+            id: item.check_item_id,
+            code: item.check_item_code,
+            name: item.check_item_name,
+            description: item.check_item_description,
+            category: item.check_item_category,
+            sort_order: item.sort_order,
+            checklist_version_item_id: item.id,
+          })),
+        });
+      }
+    }
+  }
+
   const items = db
     .prepare(
       `
-    SELECT * FROM check_items ORDER BY sort_order ASC, id ASC
+    SELECT * FROM check_items WHERE is_active = 1 ORDER BY sort_order ASC, id ASC
   `,
     )
     .all();
@@ -14,6 +103,54 @@ router.get("/check-items", (req, res) => {
   res.json({
     code: 0,
     data: items,
+  });
+});
+
+router.get("/checklist-version/:versionId", (req, res) => {
+  const { versionId } = req.params;
+
+  const record = db
+    .prepare(
+      `
+    SELECT rr.checklist_version_id 
+    FROM review_records rr
+    WHERE rr.version_id = ?
+    ORDER BY rr.review_round DESC
+    LIMIT 1
+  `,
+    )
+    .get(versionId);
+
+  if (!record || !record.checklist_version_id) {
+    return res.json({ code: 1, message: "该版本暂无审核清单版本信息" });
+  }
+
+  const version = db
+    .prepare(
+      `
+    SELECT cv.*, ct.name as template_name
+    FROM checklist_versions cv
+    JOIN checklist_templates ct ON cv.template_id = ct.id
+    WHERE cv.id = ?
+  `,
+    )
+    .get(record.checklist_version_id);
+
+  const items = db
+    .prepare(
+      `
+    SELECT * FROM checklist_version_items 
+    WHERE checklist_version_id = ?
+    ORDER BY sort_order ASC
+  `,
+    )
+    .all(record.checklist_version_id);
+
+  version.items = items;
+
+  res.json({
+    code: 0,
+    data: version,
   });
 });
 
@@ -69,6 +206,26 @@ router.post("/start/:versionId", (req, res) => {
     });
   }
 
+  let checklistVersionId = null;
+  if (version.category_id) {
+    const latestVersion = db
+      .prepare(
+        `
+      SELECT cv.id 
+      FROM category_template_mapping ctm
+      JOIN checklist_versions cv ON ctm.template_id = cv.template_id
+      WHERE ctm.category_id = ? AND cv.is_locked = 1
+      ORDER BY cv.created_at DESC
+      LIMIT 1
+    `,
+      )
+      .get(version.category_id);
+
+    if (latestVersion) {
+      checklistVersionId = latestVersion.id;
+    }
+  }
+
   const result = db.transaction(() => {
     db.prepare(
       `
@@ -81,19 +238,19 @@ router.post("/start/:versionId", (req, res) => {
     const record = db
       .prepare(
         `
-      INSERT INTO review_records (version_id, review_round, reviewer, start_time)
-      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+      INSERT INTO review_records (version_id, review_round, reviewer, checklist_version_id, start_time)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
     `,
       )
-      .run(versionId, currentRound, reviewer);
+      .run(versionId, currentRound, reviewer, checklistVersionId);
 
-    return record.lastInsertRowid;
+    return { recordId: record.lastInsertRowid, checklistVersionId };
   })();
 
   res.json({
     code: 0,
-    data: { recordId: result },
-    message: "开始审核",
+    data: result,
+    message: checklistVersionId ? "开始审核，已绑定清单版本" : "开始审核",
   });
 });
 
@@ -116,11 +273,55 @@ router.post("/submit/:versionId", (req, res) => {
     return res.json({ code: 1, message: "请填写审核项结果" });
   }
 
-  const allCheckItems = db
-    .prepare("SELECT id FROM check_items ORDER BY id ASC")
-    .all();
-  const allItemIds = allCheckItems.map((item) => item.id);
-  const totalCheckItems = allCheckItems.length;
+  const currentRecord = db
+    .prepare(
+      `
+    SELECT * FROM review_records 
+    WHERE version_id = ? 
+    ORDER BY review_round DESC LIMIT 1
+  `,
+    )
+    .get(versionId);
+
+  if (!currentRecord) {
+    return res.json({ code: 1, message: "审核记录不存在" });
+  }
+
+  if (currentRecord.end_time) {
+    return res.json({ code: 1, message: "当前审核已完成，不能重复提交" });
+  }
+
+  const expectedRound = version.reject_count + 1;
+  if (currentRecord.review_round !== expectedRound) {
+    return res.json({
+      code: 1,
+      message: "审核轮次不匹配，请重新开始审核",
+    });
+  }
+
+  let allCheckItems = [];
+  let allItemIds = [];
+  let totalCheckItems = 0;
+
+  if (currentRecord.checklist_version_id) {
+    allCheckItems = db
+      .prepare(
+        `
+      SELECT id, check_item_id FROM checklist_version_items 
+      WHERE checklist_version_id = ? 
+      ORDER BY sort_order ASC
+    `,
+      )
+      .all(currentRecord.checklist_version_id);
+    allItemIds = allCheckItems.map((item) => item.check_item_id);
+    totalCheckItems = allCheckItems.length;
+  } else {
+    allCheckItems = db
+      .prepare("SELECT id FROM check_items WHERE is_active = 1 ORDER BY id ASC")
+      .all();
+    allItemIds = allCheckItems.map((item) => item.id);
+    totalCheckItems = allCheckItems.length;
+  }
 
   const submittedItemIds = results
     .map((r) => {
@@ -154,42 +355,33 @@ router.post("/submit/:versionId", (req, res) => {
   const hasFail = results.some((r) => r.result === "fail");
   const finalResult = hasFail ? "rejected" : "approved";
 
-  const currentRecord = db
-    .prepare(
-      `
-    SELECT * FROM review_records 
-    WHERE version_id = ? 
-    ORDER BY review_round DESC LIMIT 1
-  `,
-    )
-    .get(versionId);
-
-  if (!currentRecord) {
-    return res.json({ code: 1, message: "审核记录不存在" });
-  }
-
-  if (currentRecord.end_time) {
-    return res.json({ code: 1, message: "当前审核已完成，不能重复提交" });
-  }
-
-  const expectedRound = version.reject_count + 1;
-  if (currentRecord.review_round !== expectedRound) {
-    return res.json({
-      code: 1,
-      message: "审核轮次不匹配，请重新开始审核",
-    });
+  const versionItemMap = {};
+  if (currentRecord.checklist_version_id) {
+    const versionItems = db
+      .prepare(
+        `
+      SELECT id, check_item_id FROM checklist_version_items 
+      WHERE checklist_version_id = ?
+    `,
+      )
+      .all(currentRecord.checklist_version_id);
+    for (const vi of versionItems) {
+      versionItemMap[vi.check_item_id] = vi.id;
+    }
   }
 
   db.transaction(() => {
     const insertItem = db.prepare(`
-      INSERT INTO review_item_results (record_id, check_item_id, result, comment)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO review_item_results (record_id, check_item_id, checklist_version_item_id, result, comment)
+      VALUES (?, ?, ?, ?, ?)
     `);
 
     for (const item of results) {
+      const versionItemId = versionItemMap[item.check_item_id] || null;
       insertItem.run(
         currentRecord.id,
         item.check_item_id,
+        versionItemId,
         item.result,
         item.comment || null,
       );

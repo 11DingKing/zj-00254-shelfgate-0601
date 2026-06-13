@@ -9,6 +9,13 @@ const app = {
     total: 0,
     list: [],
   },
+  appealList: {
+    page: 1,
+    pageSize: 10,
+    status: "all",
+    total: 0,
+    list: [],
+  },
 };
 
 function formatTime(timeStr) {
@@ -67,10 +74,17 @@ function navigateTo(page) {
   document.querySelectorAll(".nav-item").forEach((item) => {
     item.classList.toggle("active", item.dataset.page === page);
   });
-  const titleMap = { versions: "版本审核", stats: "数据统计" };
+  const titleMap = {
+    versions: "版本审核",
+    appeals: "申辩管理",
+    checklists: "清单配置",
+    stats: "数据统计",
+  };
   document.getElementById("page-title").textContent = titleMap[page] || page;
 
   if (page === "versions") renderVersionsPage();
+  if (page === "appeals") renderAppealsPage();
+  if (page === "checklists") renderChecklistsPage();
   if (page === "stats") renderStatsPage();
 }
 
@@ -271,17 +285,80 @@ async function viewVersion(id) {
             ${record.result ? `<span class="status-tag status-${record.result}">${record.result === "approved" ? "通过" : "驳回"}</span>` : ""}
           </div>
         </div>
+        ${
+          record.checklist_version_id
+            ? `
+          <div class="checklist-version-info" style="background: #f0f5ff; padding: 8px 12px; margin: 8px 0; border-radius: 4px; font-size: 13px;">
+            📋 使用清单：<strong>${record.template_name}</strong> 
+            版本：<strong>${record.checklist_version_no}</strong>
+            (创建时间：${formatTime(record.checklist_created_at)})
+          </div>
+        `
+            : ""
+        }
         ${record.reject_reason ? `<div class="reject-reason">驳回原因：${record.reject_reason}</div>` : ""}
         <div>
           ${record.items
             .map(
               (item) => `
-            <div class="review-item">
-              <span class="review-item-icon">${item.result === "pass" ? "✅" : "❌"}</span>
-              <div class="review-item-content">
-                <div class="review-item-name">${item.name}</div>
+            <div class="review-item" style="position: relative;">
+              <span class="review-item-icon">${
+                item.result === "pass"
+                  ? "✅"
+                  : item.appeal_result === "accepted"
+                    ? "🟡"
+                    : "❌"
+              }</span>
+              <div class="review-item-content" style="flex: 1;">
+                <div class="review-item-name">${item.name}
+                  ${
+                    item.appeal_id
+                      ? `<span class="status-tag ${
+                          item.appeal_result === "accepted"
+                            ? "status-pending"
+                            : "status-rejected"
+                        }" style="margin-left: 8px; font-size: 11px;">
+                          ${
+                            item.appeal_result === "accepted"
+                              ? "申辩采纳"
+                              : item.appeal_result === "rejected"
+                                ? "申辩驳回"
+                                : "待申辩审核"
+                          }
+                        </span>`
+                      : ""
+                  }
+                </div>
                 ${item.comment ? `<div class="review-item-comment">${item.comment}</div>` : ""}
+                ${
+                  item.appeal_id
+                    ? `
+                  <div class="appeal-info" style="background: #fff7e6; padding: 8px 12px; margin-top: 8px; border-radius: 4px; font-size: 12px;">
+                    <div><strong>申辩内容：</strong>${item.appeal_content}</div>
+                    <div style="margin-top: 4px;"><small>提交时间：${formatTime(item.appeal_submitted_at)}</small></div>
+                    ${
+                      item.appeal_review_comment
+                        ? `<div style="margin-top: 4px;"><strong>审核意见：</strong>${item.appeal_review_comment}</div>`
+                        : ""
+                    }
+                  </div>
+                `
+                    : ""
+                }
               </div>
+              ${
+                v.status === "rejected" &&
+                item.result === "fail" &&
+                !item.has_appeal &&
+                !item.appeal_id
+                  ? `
+                <button class="btn btn-sm btn-default" style="margin-left: 10px;" 
+                        onclick="showAppealModal(${v.id}, ${item.id}, '${item.name.replace(/'/g, "\\'")}')">
+                  📝 申辩
+                </button>
+              `
+                  : ""
+              }
             </div>
           `,
             )
@@ -294,7 +371,7 @@ async function viewVersion(id) {
       : '<div class="empty">暂无审核记录</div>';
 
   const content = `
-    <div class="version-info">
+    <div class="version-info" style="grid-template-columns: repeat(3, 1fr);">
       <div class="info-item">
         <span class="info-label">应用名称</span>
         <span class="info-value">${v.app_name}</span>
@@ -306,6 +383,10 @@ async function viewVersion(id) {
       <div class="info-item">
         <span class="info-label">厂商</span>
         <span class="info-value">${v.vendor}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">应用类别</span>
+        <span class="info-value">${v.category_name || "未设置"}</span>
       </div>
       <div class="info-item">
         <span class="info-label">当前状态</span>
@@ -369,6 +450,57 @@ async function viewVersion(id) {
   showModal(content, { title: "版本详情", size: "lg", footer });
 }
 
+function showAppealModal(versionId, reviewItemResultId, itemName) {
+  const content = `
+    <div style="margin-bottom: 16px;">
+      <strong>申诉项：</strong>${itemName}
+    </div>
+    <div class="form-item">
+      <label class="required">申辩内容</label>
+      <textarea id="appeal-content" placeholder="请详细说明申诉理由..." style="width: 100%; min-height: 120px;"></textarea>
+    </div>
+    <div class="form-item">
+      <label class="required">厂商名称</label>
+      <input type="text" id="appeal-vendor-name" placeholder="请输入厂商名称" style="width: 100%;">
+    </div>
+  `;
+
+  const footer = `
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitAppeal(${versionId}, ${reviewItemResultId})">提交申辩</button>
+    </div>
+  `;
+
+  showModal(content, { title: "提交申辩", footer });
+}
+
+async function submitAppeal(versionId, reviewItemResultId) {
+  const content = document.getElementById("appeal-content").value.trim();
+  const vendorName = document.getElementById("appeal-vendor-name").value.trim();
+
+  if (!content || !vendorName) {
+    showToast("请填写完整信息", "error");
+    return;
+  }
+
+  const res = await api.submitAppeal({
+    review_item_result_id: reviewItemResultId,
+    vendor_id: vendorName,
+    vendor_name: vendorName,
+    content,
+  });
+
+  if (res.code !== 0) {
+    showToast(res.message || "提交失败", "error");
+    return;
+  }
+
+  showToast("申辩提交成功");
+  closeModal();
+  viewVersion(versionId);
+}
+
 async function startReview(versionId) {
   const res = await api.startReview(versionId, "管理员");
   if (res.code !== 0) {
@@ -382,7 +514,7 @@ async function startReview(versionId) {
 async function showReviewModal(versionId) {
   const [versionRes, itemsRes] = await Promise.all([
     api.getVersion(versionId),
-    api.getCheckItems(),
+    api.getCheckItems(versionId),
   ]);
 
   if (versionRes.code !== 0 || itemsRes.code !== 0) {
@@ -396,6 +528,24 @@ async function showReviewModal(versionId) {
   if (version.status !== "reviewing") {
     showToast("当前状态不可审核", "error");
     return;
+  }
+
+  const latestRecord =
+    version.review_records && version.review_records.length > 0
+      ? version.review_records[0]
+      : null;
+
+  let checklistInfo = "";
+  if (latestRecord && latestRecord.checklist_version_id) {
+    checklistInfo = `
+      <div class="checklist-version-info" style="background: #f0f5ff; padding: 12px; margin-bottom: 16px; border-radius: 4px; font-size: 13px;">
+        📋 <strong>使用清单：</strong>${latestRecord.template_name} 
+        <strong>版本：</strong>${latestRecord.checklist_version_no}
+        <small style="color: #666; margin-left: 8px;">
+          (创建时间：${formatTime(latestRecord.checklist_created_at)}，创建人：${latestRecord.checklist_created_by || "系统"})
+        </small>
+      </div>
+    `;
   }
 
   const itemsHtml = checkItems
@@ -441,10 +591,12 @@ async function showReviewModal(versionId) {
         <span class="info-value">${version.vendor}</span>
       </div>
       <div class="info-item">
-        <span class="info-label">第 N 轮审核</span>
-        <span class="info-value">第 ${version.reject_count + 1} 轮</span>
+        <span class="info-label">应用类别</span>
+        <span class="info-value">${version.category_name || "未设置"}</span>
       </div>
     </div>
+
+    ${checklistInfo}
 
     <div class="section-title">合规检查清单</div>
     <div id="check-list">
@@ -558,7 +710,10 @@ async function submitReviewResult(versionId) {
   renderVersionsPage();
 }
 
-function showSubmitModal() {
+async function showSubmitModal() {
+  const categoriesRes = await api.getCategories();
+  const categories = categoriesRes.data || [];
+
   const content = `
     <div class="form-item">
       <label class="required">应用名称</label>
@@ -571,6 +726,18 @@ function showSubmitModal() {
     <div class="form-item">
       <label class="required">厂商</label>
       <input type="text" id="new-vendor" placeholder="请输入厂商名称" style="width: 100%;">
+    </div>
+    <div class="form-item">
+      <label class="required">应用类别</label>
+      <select id="new-category-id" style="width: 100%;">
+        <option value="">请选择应用类别</option>
+        ${categories
+          .map(
+            (c) =>
+              `<option value="${c.id}">${c.name}${c.description ? ` - ${c.description}` : ""}</option>`,
+          )
+          .join("")}
+      </select>
     </div>
   `;
 
@@ -588,8 +755,9 @@ async function submitNewVersion() {
   const appName = document.getElementById("new-app-name").value.trim();
   const versionNo = document.getElementById("new-version-no").value.trim();
   const vendor = document.getElementById("new-vendor").value.trim();
+  const categoryId = document.getElementById("new-category-id").value;
 
-  if (!appName || !versionNo || !vendor) {
+  if (!appName || !versionNo || !vendor || !categoryId) {
     showToast("请填写完整信息", "error");
     return;
   }
@@ -598,6 +766,7 @@ async function submitNewVersion() {
     app_name: appName,
     version_no: versionNo,
     vendor,
+    category_id: parseInt(categoryId),
   });
 
   if (res.code !== 0) {
@@ -660,23 +829,1008 @@ async function reSubmitVersion(versionId) {
   renderVersionsPage();
 }
 
+async function renderAppealsPage() {
+  const container = document.getElementById("page-container");
+
+  const statusOptions = [
+    { value: "all", label: "全部状态" },
+    { value: "pending", label: "待审核" },
+    { value: "reviewed", label: "已处理" },
+  ];
+
+  const res = await api.getAppeals({
+    page: app.appealList.page,
+    pageSize: app.appealList.pageSize,
+    status: app.appealList.status,
+  });
+
+  const { list, total } = res.data;
+  app.appealList.total = total;
+  app.appealList.list = list;
+
+  const totalPages = Math.ceil(total / app.appealList.pageSize);
+
+  const statusMap = {
+    pending: "待审核",
+    reviewed: "已处理",
+  };
+
+  const reviewResultMap = {
+    accepted: "采纳",
+    rejected: "维持原判",
+  };
+
+  container.innerHTML = `
+    <div class="card">
+      <div class="filter-bar">
+        <div class="filter-item">
+          <label>状态：</label>
+          <select id="appeal-filter-status">
+            ${statusOptions
+              .map(
+                (s) =>
+                  `<option value="${s.value}" ${
+                    app.appealList.status === s.value ? "selected" : ""
+                  }>${s.label}</option>`,
+              )
+              .join("")}
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="handleAppealSearch()">🔍 搜索</button>
+        <button class="btn btn-default" onclick="handleAppealResetSearch()">重置</button>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>应用名称</th>
+            <th>版本号</th>
+            <th>厂商</th>
+            <th>检查项</th>
+            <th>提交时间</th>
+            <th>状态</th>
+            <th>处理结果</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            list.length === 0
+              ? '<tr><td colspan="8" class="empty">暂无数据</td></tr>'
+              : list
+                  .map(
+                    (item) => `
+            <tr>
+              <td><strong>${item.app_name}</strong></td>
+              <td>${item.version_no}</td>
+              <td>${item.vendor_name}</td>
+              <td>${item.check_item_name || "-"}</td>
+              <td>${formatTime(item.submitted_at)}</td>
+              <td>
+                <span class="status-tag ${
+                  item.status === "pending"
+                    ? "status-pending"
+                    : "status-approved"
+                }">
+                  ${statusMap[item.status] || item.status}
+                </span>
+              </td>
+              <td>
+                ${
+                  item.review_result
+                    ? `<span class="status-tag ${
+                        item.review_result === "accepted"
+                          ? "status-approved"
+                          : "status-rejected"
+                      }">
+                        ${reviewResultMap[item.review_result] || item.review_result}
+                      </span>`
+                    : "-"
+                }
+              </td>
+              <td>
+                <button class="link-btn" onclick="viewAppeal(${item.id})">查看</button>
+                ${
+                  item.status === "pending"
+                    ? `<button class="link-btn" onclick="showReviewAppealModal(${item.id})" style="margin-left: 8px;">处理</button>`
+                    : ""
+                }
+              </td>
+            </tr>
+          `,
+                  )
+                  .join("")
+          }
+        </tbody>
+      </table>
+
+      <div class="pagination">
+        <span class="pagination-info">共 ${total} 条</span>
+        <button class="pagination-btn" onclick="goToAppealPage(1)" ${
+          app.appealList.page <= 1 ? "disabled" : ""
+        }>首页</button>
+        <button class="pagination-btn" onclick="goToAppealPage(${
+          app.appealList.page - 1
+        })" ${app.appealList.page <= 1 ? "disabled" : ""}>上一页</button>
+        <button class="pagination-btn" onclick="goToAppealPage(${
+          app.appealList.page + 1
+        })" ${app.appealList.page >= totalPages ? "disabled" : ""}>下一页</button>
+        <button class="pagination-btn" onclick="goToAppealPage(${totalPages})" ${
+          app.appealList.page >= totalPages ? "disabled" : ""
+        }>末页</button>
+      </div>
+    </div>
+  `;
+}
+
+function handleAppealSearch() {
+  app.appealList.status = document.getElementById("appeal-filter-status").value;
+  app.appealList.page = 1;
+  renderAppealsPage();
+}
+
+function handleAppealResetSearch() {
+  app.appealList.status = "all";
+  app.appealList.page = 1;
+  renderAppealsPage();
+}
+
+function goToAppealPage(page) {
+  app.appealList.page = page;
+  renderAppealsPage();
+}
+
+async function viewAppeal(id) {
+  const res = await api.getAppeal(id);
+  if (res.code !== 0) {
+    showToast(res.message || "获取失败", "error");
+    return;
+  }
+  const appeal = res.data;
+
+  const statusMap = {
+    pending: "待审核",
+    reviewed: "已处理",
+  };
+
+  const reviewResultMap = {
+    accepted: "采纳",
+    rejected: "维持原判",
+  };
+
+  const content = `
+    <div class="version-info" style="grid-template-columns: repeat(3, 1fr);">
+      <div class="info-item">
+        <span class="info-label">应用名称</span>
+        <span class="info-value">${appeal.app_name}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">版本号</span>
+        <span class="info-value">${appeal.version_no}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">厂商</span>
+        <span class="info-value">${appeal.vendor_name}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">使用清单</span>
+        <span class="info-value">${appeal.template_name || "-"}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">清单版本</span>
+        <span class="info-value">${appeal.checklist_version_no || "-"}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">审核轮次</span>
+        <span class="info-value">第 ${appeal.review_round} 轮</span>
+      </div>
+    </div>
+
+    <div class="section-title">检查项信息</div>
+    <div class="review-item" style="background: #fff7e6; padding: 12px; border-radius: 4px; margin-bottom: 16px;">
+      <div class="review-item-content">
+        <div class="review-item-name">
+          ${appeal.check_item_name || "-"}
+          <span class="status-tag status-rejected" style="margin-left: 8px;">不通过</span>
+        </div>
+        <div class="review-item-comment">分类：${appeal.check_item_category || "-"}</div>
+        ${
+          appeal.check_item_description
+            ? `<div class="review-item-comment" style="margin-top: 4px;">说明：${appeal.check_item_description}</div>`
+            : ""
+        }
+        ${
+          appeal.item_comment
+            ? `<div class="review-item-comment" style="margin-top: 8px; color: #ff4d4f;">审核不通过原因：${appeal.item_comment}</div>`
+            : ""
+        }
+      </div>
+    </div>
+
+    <div class="section-title">申辩内容</div>
+    <div style="background: #f6ffed; padding: 16px; border-radius: 4px; line-height: 1.8; margin-bottom: 16px;">
+      ${appeal.content}
+    </div>
+
+    <div style="font-size: 13px; color: #666; margin-bottom: 16px;">
+      提交时间：${formatTime(appeal.submitted_at)}
+    </div>
+
+    ${
+      appeal.status === "reviewed"
+        ? `
+      <div class="section-title">处理结果</div>
+      <div style="background: #f0f5ff; padding: 16px; border-radius: 4px; margin-bottom: 8px;">
+        <div style="margin-bottom: 8px;">
+          处理结果：<span class="status-tag ${
+            appeal.review_result === "accepted"
+              ? "status-approved"
+              : "status-rejected"
+          }">
+            ${reviewResultMap[appeal.review_result] || appeal.review_result}
+          </span>
+        </div>
+        <div style="margin-bottom: 8px;">处理人：${appeal.reviewer || "-"}</div>
+        ${
+          appeal.review_comment
+            ? `<div>审核意见：${appeal.review_comment}</div>`
+            : ""
+        }
+        <div style="font-size: 13px; color: #666; margin-top: 8px;">
+          处理时间：${formatTime(appeal.reviewed_at)}
+        </div>
+      </div>
+    `
+        : ""
+    }
+  `;
+
+  let footer = "";
+  if (appeal.status === "pending") {
+    footer = `
+      <div class="modal-footer">
+        <button class="btn btn-default" onclick="closeModal()">关闭</button>
+        <button class="btn btn-primary" onclick="showReviewAppealModal(${appeal.id})">处理</button>
+      </div>
+    `;
+  }
+
+  showModal(content, { title: "申辩详情", size: "lg", footer });
+}
+
+function showReviewAppealModal(id) {
+  const content = `
+    <div class="form-item">
+      <label class="required">处理结果</label>
+      <select id="appeal-review-result" style="width: 100%;">
+        <option value="">请选择处理结果</option>
+        <option value="accepted">采纳 - 修改为通过</option>
+        <option value="rejected">维持原判</option>
+      </select>
+    </div>
+    <div class="form-item">
+      <label>审核意见</label>
+      <textarea id="appeal-review-comment" placeholder="请填写审核意见..." style="width: 100%; min-height: 100px;"></textarea>
+    </div>
+  `;
+
+  const footer = `
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitAppealReview(${id})">确认处理</button>
+    </div>
+  `;
+
+  showModal(content, { title: "处理申辩", footer });
+}
+
+async function submitAppealReview(id) {
+  const reviewResult = document.getElementById("appeal-review-result").value;
+  const reviewComment = document
+    .getElementById("appeal-review-comment")
+    .value.trim();
+
+  if (!reviewResult) {
+    showToast("请选择处理结果", "error");
+    return;
+  }
+
+  const res = await api.reviewAppeal(id, {
+    review_result: reviewResult,
+    review_comment: reviewComment || null,
+    reviewer: "管理员",
+  });
+
+  if (res.code !== 0) {
+    showToast(res.message || "处理失败", "error");
+    return;
+  }
+
+  showToast(res.message || "处理成功");
+  closeModal();
+  renderAppealsPage();
+}
+
+async function renderChecklistsPage() {
+  const container = document.getElementById("page-container");
+
+  const [templatesRes, versionsRes, categoriesRes, mappingRes, checkItemsRes] =
+    await Promise.all([
+      api.getTemplates(true),
+      api.getChecklistVersions(),
+      api.getCategories(),
+      api.getCategoryTemplateMapping(),
+      api.getAllCheckItems(true),
+    ]);
+
+  const templates = templatesRes.data || [];
+  const versions = versionsRes.data || [];
+  const categories = categoriesRes.data || [];
+  const mappings = mappingRes.data || [];
+  const checkItems = checkItemsRes.data || [];
+
+  const templatesHtml = templates
+    .map(
+      (t) => `
+    <div class="card" style="margin-bottom: 16px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <div>
+          <h3 style="margin: 0;">📋 ${t.name}</h3>
+          <p style="margin: 4px 0 0 0; color: #666; font-size: 13px;">${
+            t.description || "暂无描述"
+          }</p>
+        </div>
+        <div>
+          <button class="btn btn-sm btn-default" onclick="showEditTemplateModal(${t.id}, '${t.name.replace(
+            /'/g,
+            "\\'",
+          )}', '${(t.description || "").replace(/'/g, "\\'")}')">编辑</button>
+          <button class="btn btn-sm btn-primary" style="margin-left: 8px;" onclick="showCreateVersionModal(${t.id}, '${t.name.replace(
+            /'/g,
+            "\\'",
+          )}')">发布新版本</button>
+        </div>
+      </div>
+      <div style="margin-bottom: 8px; font-size: 13px; color: #666;">
+        包含检查项：${t.items ? t.items.length : 0} 项
+      </div>
+      ${
+        t.items && t.items.length > 0
+          ? `
+        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+          ${t.items
+            .map(
+              (item) => `
+            <span style="background: #f0f5ff; padding: 4px 10px; border-radius: 12px; font-size: 12px;">
+              ${item.name}
+            </span>
+          `,
+            )
+            .join("")}
+        </div>
+      `
+          : ""
+      }
+    </div>
+  `,
+    )
+    .join("");
+
+  const versionsHtml = versions
+    .map(
+      (v) => `
+    <tr>
+      <td>${v.template_name}</td>
+      <td><strong>${v.version_no}</strong></td>
+      <td>${v.description || "-"}</td>
+      <td>${v.created_by || "-"}</td>
+      <td>${formatTime(v.created_at)}</td>
+      <td>
+        <span class="status-tag ${
+          v.is_locked ? "status-approved" : "status-pending"
+        }">
+          ${v.is_locked ? "已锁定" : "草稿"}
+        </span>
+      </td>
+      <td>
+        <button class="link-btn" onclick="viewChecklistVersion(${v.id})">查看</button>
+      </td>
+    </tr>
+  `,
+    )
+    .join("");
+
+  const categoriesHtml = categories
+    .map(
+      (c) => `
+    <tr>
+      <td>${c.name}</td>
+      <td>${c.description || "-"}</td>
+      <td>
+        ${
+          mappings
+            .filter((m) => m.category_id === c.id)
+            .map((m) => m.template_name)
+            .join("、") || "-"
+        }
+      </td>
+    </tr>
+  `,
+    )
+    .join("");
+
+  const checkItemsHtml = checkItems
+    .map(
+      (item) => `
+    <tr>
+      <td><code>${item.code}</code></td>
+      <td>${item.name}</td>
+      <td>${item.category}</td>
+      <td>${item.description || "-"}</td>
+      <td>
+        <button class="link-btn" onclick="showEditCheckItemModal(${item.id}, '${item.code.replace(
+          /'/g,
+          "\\'",
+        )}', '${item.name.replace(/'/g, "\\'")}', '${item.category.replace(
+          /'/g,
+          "\\'",
+        )}', '${(item.description || "").replace(/'/g, "\\'")}')">编辑</button>
+      </td>
+    </tr>
+  `,
+    )
+    .join("");
+
+  container.innerHTML = `
+    <div style="margin-bottom: 24px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <h3 style="margin: 0;">📑 清单模板</h3>
+        <button class="btn btn-primary" onclick="showCreateTemplateModal()">➕ 新建模板</button>
+      </div>
+      ${templatesHtml || '<div class="empty">暂无模板</div>'}
+    </div>
+
+    <div class="card" style="margin-bottom: 24px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <h3 style="margin: 0;">📌 清单版本记录</h3>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>模板名称</th>
+            <th>版本号</th>
+            <th>说明</th>
+            <th>创建人</th>
+            <th>创建时间</th>
+            <th>状态</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${versionsHtml || '<tr><td colspan="7" class="empty">暂无版本</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-bottom: 24px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <h3 style="margin: 0;">🏷️ 应用类别</h3>
+        <button class="btn btn-primary" onclick="showCreateCategoryModal()">➕ 新建类别</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>类别名称</th>
+            <th>说明</th>
+            <th>关联清单模板</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${categoriesHtml || '<tr><td colspan="3" class="empty">暂无类别</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <h3 style="margin: 0;">🔍 检查项库</h3>
+        <button class="btn btn-primary" onclick="showCreateCheckItemModal()">➕ 新建检查项</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>编码</th>
+            <th>名称</th>
+            <th>分类</th>
+            <th>描述</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${checkItemsHtml || '<tr><td colspan="5" class="empty">暂无检查项</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  window.currentTemplates = templates;
+  window.currentCategories = categories;
+  window.currentCheckItems = checkItems;
+}
+
+function showCreateTemplateModal() {
+  const checkItems = window.currentCheckItems || [];
+  const categories = window.currentCategories || [];
+
+  const content = `
+    <div class="form-item">
+      <label class="required">模板名称</label>
+      <input type="text" id="new-template-name" placeholder="请输入模板名称" style="width: 100%;">
+    </div>
+    <div class="form-item">
+      <label>描述</label>
+      <textarea id="new-template-desc" placeholder="请输入模板描述..." style="width: 100%; min-height: 60px;"></textarea>
+    </div>
+    <div class="form-item">
+      <label>包含检查项</label>
+      <div style="max-height: 200px; overflow-y: auto; border: 1px solid #d9d9d9; border-radius: 4px; padding: 8px;">
+        ${checkItems
+          .map(
+            (item) => `
+          <label style="display: block; padding: 4px 0; cursor: pointer;">
+            <input type="checkbox" name="template-item" value="${item.id}">
+            <span style="margin-left: 4px;">${item.name}</span>
+            <span style="color: #999; font-size: 12px; margin-left: 8px;">[${item.category}]</span>
+          </label>
+        `,
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+
+  const footer = `
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitCreateTemplate()">创建</button>
+    </div>
+  `;
+
+  showModal(content, { title: "新建清单模板", size: "lg", footer });
+}
+
+async function submitCreateTemplate() {
+  const name = document.getElementById("new-template-name").value.trim();
+  const description = document.getElementById("new-template-desc").value.trim();
+  const itemCheckboxes = document.querySelectorAll(
+    'input[name="template-item"]:checked',
+  );
+  const itemIds = Array.from(itemCheckboxes).map((cb) => parseInt(cb.value));
+
+  if (!name) {
+    showToast("请输入模板名称", "error");
+    return;
+  }
+
+  const res = await api.createTemplate({
+    name,
+    description: description || null,
+    item_ids: itemIds,
+  });
+
+  if (res.code !== 0) {
+    showToast(res.message || "创建失败", "error");
+    return;
+  }
+
+  showToast("创建成功");
+  closeModal();
+  renderChecklistsPage();
+}
+
+function showEditTemplateModal(id, name, description) {
+  const checkItems = window.currentCheckItems || [];
+  const template = window.currentTemplates?.find((t) => t.id === id);
+  const selectedItemIds = template?.items?.map((item) => item.id) || [];
+
+  const content = `
+    <div class="form-item">
+      <label class="required">模板名称</label>
+      <input type="text" id="edit-template-name" value="${name}" style="width: 100%;">
+    </div>
+    <div class="form-item">
+      <label>描述</label>
+      <textarea id="edit-template-desc" style="width: 100%; min-height: 60px;">${description}</textarea>
+    </div>
+    <div class="form-item">
+      <label>包含检查项</label>
+      <div style="max-height: 200px; overflow-y: auto; border: 1px solid #d9d9d9; border-radius: 4px; padding: 8px;">
+        ${checkItems
+          .map(
+            (item) => `
+          <label style="display: block; padding: 4px 0; cursor: pointer;">
+            <input type="checkbox" name="edit-template-item" value="${
+              item.id
+            }" ${selectedItemIds.includes(item.id) ? "checked" : ""}>
+            <span style="margin-left: 4px;">${item.name}</span>
+            <span style="color: #999; font-size: 12px; margin-left: 8px;">[${item.category}]</span>
+          </label>
+        `,
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+
+  const footer = `
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitEditTemplate(${id})">保存</button>
+    </div>
+  `;
+
+  showModal(content, { title: "编辑清单模板", size: "lg", footer });
+}
+
+async function submitEditTemplate(id) {
+  const name = document.getElementById("edit-template-name").value.trim();
+  const description = document
+    .getElementById("edit-template-desc")
+    .value.trim();
+  const itemCheckboxes = document.querySelectorAll(
+    'input[name="edit-template-item"]:checked',
+  );
+  const itemIds = Array.from(itemCheckboxes).map((cb) => parseInt(cb.value));
+
+  if (!name) {
+    showToast("请输入模板名称", "error");
+    return;
+  }
+
+  const res = await api.updateTemplate(id, {
+    name,
+    description: description || null,
+    item_ids: itemIds,
+  });
+
+  if (res.code !== 0) {
+    showToast(res.message || "更新失败", "error");
+    return;
+  }
+
+  showToast("更新成功");
+  closeModal();
+  renderChecklistsPage();
+}
+
+function showCreateVersionModal(templateId, templateName) {
+  const content = `
+    <div style="margin-bottom: 12px;">
+      <strong>模板：</strong>${templateName}
+    </div>
+    <div class="form-item">
+      <label class="required">版本号</label>
+      <input type="text" id="new-version-no" placeholder="请输入版本号，如 1.0.1" style="width: 100%;">
+    </div>
+    <div class="form-item">
+      <label>版本说明</label>
+      <textarea id="new-version-desc" placeholder="请输入版本说明..." style="width: 100%; min-height: 60px;"></textarea>
+    </div>
+    <div style="font-size: 12px; color: #666; margin-top: 8px;">
+      ⚠️ 发布版本后将自动锁定，包含的检查项将生成快照，不能再修改
+    </div>
+  `;
+
+  const footer = `
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitCreateVersion(${templateId})">发布</button>
+    </div>
+  `;
+
+  showModal(content, { title: "发布清单新版本", footer });
+}
+
+async function submitCreateVersion(templateId) {
+  const versionNo = document.getElementById("new-version-no").value.trim();
+  const description = document.getElementById("new-version-desc").value.trim();
+
+  if (!versionNo) {
+    showToast("请输入版本号", "error");
+    return;
+  }
+
+  const res = await api.createChecklistVersion({
+    template_id: templateId,
+    version_no: versionNo,
+    description: description || null,
+    created_by: "管理员",
+  });
+
+  if (res.code !== 0) {
+    showToast(res.message || "发布失败", "error");
+    return;
+  }
+
+  showToast("版本发布成功");
+  closeModal();
+  renderChecklistsPage();
+}
+
+async function viewChecklistVersion(id) {
+  const res = await api.getChecklistVersion(id);
+  if (res.code !== 0) {
+    showToast(res.message || "获取失败", "error");
+    return;
+  }
+  const version = res.data;
+
+  const itemsHtml = version.items
+    .map(
+      (item, index) => `
+    <div class="check-item" style="border: 1px solid #e8e8e8; border-radius: 4px; padding: 12px; margin-bottom: 8px;">
+      <div class="check-item-header">
+        <div class="check-item-info">
+          <span class="check-item-category">${item.check_item_category}</span>
+          <div class="check-item-name">${index + 1}. ${item.check_item_name}</div>
+          <div class="check-item-desc">${item.check_item_description || ""}</div>
+        </div>
+      </div>
+    </div>
+  `,
+    )
+    .join("");
+
+  const content = `
+    <div class="version-info" style="grid-template-columns: repeat(3, 1fr);">
+      <div class="info-item">
+        <span class="info-label">模板名称</span>
+        <span class="info-value">${version.template_name}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">版本号</span>
+        <span class="info-value"><strong>${version.version_no}</strong></span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">创建人</span>
+        <span class="info-value">${version.created_by || "-"}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">说明</span>
+        <span class="info-value">${version.description || "-"}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">创建时间</span>
+        <span class="info-value">${formatTime(version.created_at)}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">状态</span>
+        <span class="info-value">
+          <span class="status-tag ${version.is_locked ? "status-approved" : "status-pending"}">
+            ${version.is_locked ? "已锁定" : "草稿"}
+          </span>
+        </span>
+      </div>
+    </div>
+
+    <div class="section-title">检查项（${version.items.length} 项）</div>
+    ${itemsHtml}
+  `;
+
+  showModal(content, { title: "清单版本详情", size: "lg" });
+}
+
+function showCreateCategoryModal() {
+  const content = `
+    <div class="form-item">
+      <label class="required">类别名称</label>
+      <input type="text" id="new-category-name" placeholder="请输入类别名称，如：游戏类" style="width: 100%;">
+    </div>
+    <div class="form-item">
+      <label>说明</label>
+      <textarea id="new-category-desc" placeholder="请输入类别说明..." style="width: 100%; min-height: 60px;"></textarea>
+    </div>
+  `;
+
+  const footer = `
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitCreateCategory()">创建</button>
+    </div>
+  `;
+
+  showModal(content, { title: "新建应用类别", footer });
+}
+
+async function submitCreateCategory() {
+  const name = document.getElementById("new-category-name").value.trim();
+  const description = document.getElementById("new-category-desc").value.trim();
+
+  if (!name) {
+    showToast("请输入类别名称", "error");
+    return;
+  }
+
+  const res = await api.createCategory({
+    name,
+    description: description || null,
+  });
+
+  if (res.code !== 0) {
+    showToast(res.message || "创建失败", "error");
+    return;
+  }
+
+  showToast("创建成功");
+  closeModal();
+  renderChecklistsPage();
+}
+
+function showCreateCheckItemModal() {
+  const content = `
+    <div class="form-item">
+      <label class="required">检查项编码</label>
+      <input type="text" id="new-checkitem-code" placeholder="请输入唯一编码，如：shake_trigger" style="width: 100%;">
+    </div>
+    <div class="form-item">
+      <label class="required">检查项名称</label>
+      <input type="text" id="new-checkitem-name" placeholder="请输入检查项名称" style="width: 100%;">
+    </div>
+    <div class="form-item">
+      <label class="required">分类</label>
+      <input type="text" id="new-checkitem-category" placeholder="请输入分类，如：开屏广告" style="width: 100%;">
+    </div>
+    <div class="form-item">
+      <label>描述</label>
+      <textarea id="new-checkitem-desc" placeholder="请输入检查项描述..." style="width: 100%; min-height: 60px;"></textarea>
+    </div>
+  `;
+
+  const footer = `
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitCreateCheckItem()">创建</button>
+    </div>
+  `;
+
+  showModal(content, { title: "新建检查项", footer });
+}
+
+async function submitCreateCheckItem() {
+  const code = document.getElementById("new-checkitem-code").value.trim();
+  const name = document.getElementById("new-checkitem-name").value.trim();
+  const category = document
+    .getElementById("new-checkitem-category")
+    .value.trim();
+  const description = document
+    .getElementById("new-checkitem-desc")
+    .value.trim();
+
+  if (!code || !name || !category) {
+    showToast("请填写完整信息", "error");
+    return;
+  }
+
+  const res = await api.createCheckItem({
+    code,
+    name,
+    category,
+    description: description || null,
+    sort_order: 0,
+  });
+
+  if (res.code !== 0) {
+    showToast(res.message || "创建失败", "error");
+    return;
+  }
+
+  showToast("创建成功");
+  closeModal();
+  renderChecklistsPage();
+}
+
+function showEditCheckItemModal(id, code, name, category, description) {
+  const content = `
+    <div class="form-item">
+      <label class="required">检查项编码</label>
+      <input type="text" id="edit-checkitem-code" value="${code}" style="width: 100%;" readonly>
+    </div>
+    <div class="form-item">
+      <label class="required">检查项名称</label>
+      <input type="text" id="edit-checkitem-name" value="${name}" style="width: 100%;">
+    </div>
+    <div class="form-item">
+      <label class="required">分类</label>
+      <input type="text" id="edit-checkitem-category" value="${category}" style="width: 100%;">
+    </div>
+    <div class="form-item">
+      <label>描述</label>
+      <textarea id="edit-checkitem-desc" style="width: 100%; min-height: 60px;">${description}</textarea>
+    </div>
+  `;
+
+  const footer = `
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitEditCheckItem(${id})">保存</button>
+    </div>
+  `;
+
+  showModal(content, { title: "编辑检查项", footer });
+}
+
+async function submitEditCheckItem(id) {
+  const name = document.getElementById("edit-checkitem-name").value.trim();
+  const category = document
+    .getElementById("edit-checkitem-category")
+    .value.trim();
+  const description = document
+    .getElementById("edit-checkitem-desc")
+    .value.trim();
+
+  if (!name || !category) {
+    showToast("请填写完整信息", "error");
+    return;
+  }
+
+  const res = await api.updateCheckItem(id, {
+    name,
+    category,
+    description: description || null,
+  });
+
+  if (res.code !== 0) {
+    showToast(res.message || "更新失败", "error");
+    return;
+  }
+
+  showToast("更新成功");
+  closeModal();
+  renderChecklistsPage();
+}
+
 async function renderStatsPage() {
   const container = document.getElementById("page-container");
 
-  const [overviewRes, vendorRes, itemRes, topRes] = await Promise.all([
+  const [
+    overviewRes,
+    vendorRes,
+    itemRes,
+    topRes,
+    categoryRes,
+    templateRes,
+    versionRes,
+    appealsRes,
+    appealsVendorRes,
+  ] = await Promise.all([
     api.getOverview(),
     api.getStatsByVendor(),
     api.getStatsByCheckItem(),
     api.getTopViolations(8),
+    api.getStatsByCategory(),
+    api.getStatsByTemplate(),
+    api.getStatsByChecklistVersion(),
+    api.getStatsAppeals(),
+    api.getStatsAppealsByVendor(),
   ]);
 
   const overview = overviewRes.data;
   const vendors = vendorRes.data || [];
   const checkItems = itemRes.data || [];
   const topViolations = topRes.data || [];
+  const categoryStats = categoryRes.data || [];
+  const templateStats = templateRes.data || [];
+  const versionStats = versionRes.data || [];
+  const appealsStats = appealsRes.data || {};
+  const appealsVendorStats = appealsVendorRes.data || [];
 
   const maxFailCount = Math.max(...checkItems.map((i) => i.fail_count), 1);
   const maxRejectRate = Math.max(...vendors.map((v) => v.reject_rate), 1);
+
+  const appealAcceptRate =
+    appealsStats.total > 0
+      ? ((appealsStats.accepted / appealsStats.total) * 100).toFixed(1)
+      : 0;
 
   container.innerHTML = `
     <div class="stat-cards">
@@ -703,6 +1857,26 @@ async function renderStatsPage() {
       <div class="stat-card gray">
         <div class="stat-card-value">${overview.offShelf}</div>
         <div class="stat-card-label">已下架</div>
+      </div>
+      <div class="stat-card primary">
+        <div class="stat-card-value">${appealsStats.total || 0}</div>
+        <div class="stat-card-label">总申辩数</div>
+      </div>
+      <div class="stat-card warning">
+        <div class="stat-card-value">${appealsStats.pending || 0}</div>
+        <div class="stat-card-label">待审核申辩</div>
+      </div>
+      <div class="stat-card success">
+        <div class="stat-card-value">${appealsStats.accepted || 0}</div>
+        <div class="stat-card-label">已采纳</div>
+      </div>
+      <div class="stat-card danger">
+        <div class="stat-card-value">${appealsStats.rejected || 0}</div>
+        <div class="stat-card-label">已驳回</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card-value">${appealAcceptRate}%</div>
+        <div class="stat-card-label">申辩采纳率</div>
       </div>
     </div>
 
@@ -781,6 +1955,170 @@ async function renderStatsPage() {
               <td>
                 <span class="status-tag ${v.reject_rate > 50 ? "status-rejected" : v.reject_rate > 20 ? "status-pending" : "status-approved"}">
                   ${v.reject_rate}%
+                </span>
+              </td>
+            </tr>
+          `,
+                  )
+                  .join("")
+          }
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card stat-section">
+      <h3>📁 按应用类别统计</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>类别</th>
+            <th>提交版本数</th>
+            <th>通过数</th>
+            <th>驳回数</th>
+            <th>审核中</th>
+            <th>待审核</th>
+            <th>通过率</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            categoryStats.length === 0
+              ? '<tr><td colspan="7" class="empty">暂无数据</td></tr>'
+              : categoryStats
+                  .map(
+                    (c) => `
+            <tr>
+              <td><strong>${c.category_name || "未分类"}</strong></td>
+              <td>${c.total}</td>
+              <td>${c.approved}</td>
+              <td>${c.rejected}</td>
+              <td>${c.reviewing}</td>
+              <td>${c.pending}</td>
+              <td>
+                <span class="status-tag ${c.pass_rate > 80 ? "status-approved" : c.pass_rate > 50 ? "status-pending" : "status-rejected"}">
+                  ${c.pass_rate}%
+                </span>
+              </td>
+            </tr>
+          `,
+                  )
+                  .join("")
+          }
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card stat-section">
+      <h3>📋 按清单模板统计</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>模板名称</th>
+            <th>版本数</th>
+            <th>通过数</th>
+            <th>驳回数</th>
+            <th>关联类别</th>
+            <th>最新版本</th>
+            <th>通过率</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            templateStats.length === 0
+              ? '<tr><td colspan="7" class="empty">暂无数据</td></tr>'
+              : templateStats
+                  .map(
+                    (t) => `
+            <tr>
+              <td><strong>${t.template_name}</strong></td>
+              <td>${t.total}</td>
+              <td>${t.approved}</td>
+              <td>${t.rejected}</td>
+              <td>${t.category_count || 0} 个</td>
+              <td>v${t.latest_version || "-"}</td>
+              <td>
+                <span class="status-tag ${t.pass_rate > 80 ? "status-approved" : t.pass_rate > 50 ? "status-pending" : "status-rejected"}">
+                  ${t.pass_rate}%
+                </span>
+              </td>
+            </tr>
+          `,
+                  )
+                  .join("")
+          }
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card stat-section">
+      <h3>🔒 按清单版本统计（追溯）</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>清单版本</th>
+            <th>模板</th>
+            <th>版本号</th>
+            <th>检查项数</th>
+            <th>使用次数</th>
+            <th>通过数</th>
+            <th>驳回数</th>
+            <th>发布时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            versionStats.length === 0
+              ? '<tr><td colspan="8" class="empty">暂无数据</td></tr>'
+              : versionStats
+                  .map(
+                    (v) => `
+            <tr>
+              <td><strong>#${v.version_id}</strong></td>
+              <td>${v.template_name}</td>
+              <td>v${v.version_number}</td>
+              <td>${v.item_count}</td>
+              <td>${v.total}</td>
+              <td>${v.approved}</td>
+              <td>${v.rejected}</td>
+              <td>${new Date(v.created_at).toLocaleString()}</td>
+            </tr>
+          `,
+                  )
+                  .join("")
+          }
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card stat-section">
+      <h3>⚖️ 各厂商申辩统计</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>厂商</th>
+            <th>申辩总数</th>
+            <th>待审核</th>
+            <th>已采纳</th>
+            <th>已驳回</th>
+            <th>采纳率</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            appealsVendorStats.length === 0
+              ? '<tr><td colspan="6" class="empty">暂无数据</td></tr>'
+              : appealsVendorStats
+                  .map(
+                    (v) => `
+            <tr>
+              <td><strong>${v.vendor}</strong></td>
+              <td>${v.total}</td>
+              <td>${v.pending}</td>
+              <td>${v.accepted}</td>
+              <td>${v.rejected}</td>
+              <td>
+                <span class="status-tag ${v.accept_rate > 50 ? "status-approved" : v.accept_rate > 20 ? "status-pending" : "status-rejected"}">
+                  ${v.accept_rate}%
                 </span>
               </td>
             </tr>

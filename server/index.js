@@ -22,6 +22,8 @@ app.use(express.static(path.join(__dirname, "../public")));
 app.use("/api/versions", require("./routes/versions"));
 app.use("/api/reviews", require("./routes/reviews"));
 app.use("/api/stats", require("./routes/stats"));
+app.use("/api/checklists", require("./routes/checklists"));
+app.use("/api/appeals", require("./routes/appeals"));
 
 app.get("/api/health", (req, res) => {
   res.json({ code: 0, message: "ok" });

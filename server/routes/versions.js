@@ -76,7 +76,14 @@ router.get("/", (req, res) => {
 
 router.get("/:id", (req, res) => {
   const version = db
-    .prepare("SELECT * FROM app_versions WHERE id = ?")
+    .prepare(
+      `
+    SELECT av.*, ac.name as category_name
+    FROM app_versions av
+    LEFT JOIN app_categories ac ON av.category_id = ac.id
+    WHERE av.id = ?
+  `,
+    )
     .get(req.params.id);
   if (!version) {
     return res.json({ code: 1, message: "版本不存在" });
@@ -85,25 +92,67 @@ router.get("/:id", (req, res) => {
   const records = db
     .prepare(
       `
-    SELECT * FROM review_records 
-    WHERE version_id = ? 
-    ORDER BY review_round DESC
+    SELECT rr.*, 
+           cv.id as checklist_version_id,
+           cv.version_no as checklist_version_no,
+           cv.description as checklist_version_desc,
+           cv.created_at as checklist_created_at,
+           cv.created_by as checklist_created_by,
+           ct.name as template_name
+    FROM review_records rr
+    LEFT JOIN checklist_versions cv ON rr.checklist_version_id = cv.id
+    LEFT JOIN checklist_templates ct ON cv.template_id = ct.id
+    WHERE rr.version_id = ? 
+    ORDER BY rr.review_round DESC
   `,
     )
     .all(req.params.id);
 
   const recordsWithItems = records.map((record) => {
-    const items = db
-      .prepare(
-        `
-      SELECT rir.*, ci.code, ci.name, ci.description, ci.category
-      FROM review_item_results rir
-      JOIN check_items ci ON rir.check_item_id = ci.id
-      WHERE rir.record_id = ?
-      ORDER BY ci.sort_order ASC
-    `,
-      )
-      .all(record.id);
+    let items;
+    if (record.checklist_version_id) {
+      items = db
+        .prepare(
+          `
+        SELECT rir.*, 
+               cvi.check_item_code as code, 
+               cvi.check_item_name as name, 
+               cvi.check_item_description as description, 
+               cvi.check_item_category as category,
+               a.id as appeal_id,
+               a.status as appeal_status,
+               a.content as appeal_content,
+               a.submitted_at as appeal_submitted_at,
+               a.review_result as appeal_result,
+               a.review_comment as appeal_review_comment
+        FROM review_item_results rir
+        JOIN checklist_version_items cvi ON rir.checklist_version_item_id = cvi.id
+        LEFT JOIN appeals a ON rir.id = a.review_item_result_id
+        WHERE rir.record_id = ?
+        ORDER BY cvi.sort_order ASC
+      `,
+        )
+        .all(record.id);
+    } else {
+      items = db
+        .prepare(
+          `
+        SELECT rir.*, ci.code, ci.name, ci.description, ci.category,
+               a.id as appeal_id,
+               a.status as appeal_status,
+               a.content as appeal_content,
+               a.submitted_at as appeal_submitted_at,
+               a.review_result as appeal_result,
+               a.review_comment as appeal_review_comment
+        FROM review_item_results rir
+        JOIN check_items ci ON rir.check_item_id = ci.id
+        LEFT JOIN appeals a ON rir.id = a.review_item_result_id
+        WHERE rir.record_id = ?
+        ORDER BY ci.sort_order ASC
+      `,
+        )
+        .all(record.id);
+    }
     return { ...record, items };
   });
 
@@ -124,21 +173,30 @@ router.get("/:id", (req, res) => {
 });
 
 router.post("/", (req, res) => {
-  const { app_name, version_no, vendor } = req.body;
+  const { app_name, version_no, vendor, category_id } = req.body;
 
   if (!app_name || !version_no || !vendor) {
     return res.json({ code: 1, message: "应用名、版本号、厂商不能为空" });
+  }
+
+  if (category_id) {
+    const category = db
+      .prepare("SELECT * FROM app_categories WHERE id = ? AND is_active = 1")
+      .get(category_id);
+    if (!category) {
+      return res.json({ code: 1, message: "选择的应用类别不存在或已停用" });
+    }
   }
 
   try {
     const result = db
       .prepare(
         `
-      INSERT INTO app_versions (app_name, version_no, vendor, status)
-      VALUES (?, ?, ?, 'pending')
+      INSERT INTO app_versions (app_name, version_no, vendor, category_id, status)
+      VALUES (?, ?, ?, ?, 'pending')
     `,
       )
-      .run(app_name, version_no, vendor);
+      .run(app_name, version_no, vendor, category_id || null);
 
     res.json({
       code: 0,
